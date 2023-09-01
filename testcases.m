@@ -26,7 +26,7 @@ switch test_case_ID
         p_0 = 80*bar_to_MPA;
 
         t_0 = 0;
-        t_end = 0.5*3600; % in seconds
+        t_end = 200; %0.5*3600; % in seconds
 
         T_amb = 5 + C_to_K;
         p_amb = 6*bar_to_MPA;

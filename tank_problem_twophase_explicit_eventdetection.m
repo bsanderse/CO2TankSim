@@ -2,6 +2,7 @@
 
 %%
 addpath('/Users/sanderse/Dropbox/work/Programming/libs/SpanWagner/');
+addpath('/Users/sanderse/Dropbox/work/Programming/libs/FastLineSegmentIntersection/');
 addpath('/Users/sanderse/Dropbox/work/Programming/RungeKutta/main/RKproperties');
 
 close all
@@ -33,8 +34,15 @@ e_0   = CO2.u_rhoT(rho_0,T_0); % in kJ/kg
 U_0   = [rho_0;rho_0*e_0;T_0];
 
 
+%% rho-e saturation curve parameterized by temperature
+T_sample = linspace(CO2.Tt, CO2.Tc,100)';
+rhog_vap = CO2.rhoVapSat(T_sample);
+eg_vap   = CO2.u_rhoT(rhog_vap,T_sample);
+rhol_vap = CO2.rhoLiqSat(T_sample);
+el_vap   = CO2.u_rhoT(rhol_vap,T_sample);
+
 %% start time integration
-dt_list = 0.001; % 2.^(-4:2);
+dt_list = 10; % 2.^(-4:2);
 %dt_list = [1 2 4 8];
 Nsim = length(dt_list);
 U_list = zeros(3,Nsim);
@@ -78,17 +86,53 @@ switch ODE_type
                 tn   = t(it_time);
                 F_RK = zeros(s,N);
                 
-                for j=1:s
+                % evaluate F_RK at tn
+                nphase_tn = getnphase(Un);
+                if (nphase_tn == 1) % single phase
+                    F_RK(1,:) = F_tank_3eqnODE_singlephase(tn,Un,param);
+                elseif (nphase_tn == 2) % two-phase
+                    F_RK(1,:) = F_tank_3eqnODE_twophase(tn,Un,param);
+                end
+                % get first nontrivial stage value (U2)
+                U2   = Un + dt*(A_RK(2,:)*F_RK).';
+                % check if phase switching has occurred from Un to U2
+                nphase_stagej = getnphase(U2);
+
+                if (nphase_stagej ~= nphase_tn)
+                    % number of phases of Uj is different from Un
+                    % this means that part of the time step has been
+                    % performed with the wrong F
+                    % let's compute the intersection with the rho-e
+                    % curve
+                    [rho_star, e_star, hasintersect] = intersection(Un,U2,[rhol_vap el_vap]);
+                    dt_old = dt;
+                    if  (hasintersect)
+                        dt   = c_RK(2)*dt_old* (rho_star - Un(1))/(U2(1) - Un(1));                        
+                        if (dt<dt_old/100)
+                            dt = dt_old;
+                        end
+                    end
+                        
+                    % redo this stage with smaller time step
+                    %U2   = Un + dt*(A_RK(2,:)*F_RK).';
+                    % check again nphase
+                    %nphase_stagej = getnphase(Uj);
+                end                
+                
+                for j=2:s
                     
                     % intermediate stage value of stage j
                     Uj   = Un + dt*(A_RK(j,:)*F_RK).';
                     
                     % time level of this stage
-                    tj   = tn + c_RK(j)*dt;
-                    
-                    % flux evaluation
-                    F_RK(j,:) = F_tank_3eqnODE(tj,Uj,param);
-                    
+                    tj   = tn + c_RK(j)*dt;                
+                             
+                    nphase_stagej = getnphase(Uj);
+                    if (nphase_stagej == 1) % single phase
+                        F_RK(j,:) = F_tank_3eqnODE_singlephase(tj,Uj,param);
+                    elseif (nphase_stagej == 2) % two-phase
+                        F_RK(j,:) = F_tank_3eqnODE_twophase(tj,Uj,param);
+                    end
                 end
                 
                 % update solution with the b-coefficients
@@ -101,6 +145,10 @@ switch ODE_type
                 
                 if (isnan(Unew))
                     error('NaN encountered');
+                end
+                
+                if (exist('dt_old','var') && dt_old ~= dt)
+                    dt = dt_old; % continue with old time step
                 end
                 
                 
@@ -199,16 +247,16 @@ set(gca,'FontSize',16);
 %% rho vs. e
 figure(4)
 T_sample = linspace(CO2.Tt, CO2.Tc,100)';
-rhog_vap_sample = CO2.rhoVapSat(T_sample);
-eg_vap_sample = CO2.u_rhoT(rhog_vap_sample,T_sample);
-rhol_vap_sample = CO2.rhoLiqSat(T_sample);
-el_vap_sample = CO2.u_rhoT(rhol_vap_sample,T_sample);
+rhog_vap = CO2.rhoVapSat(T_sample);
+eg_vap = CO2.u_rhoT(rhog_vap,T_sample);
+rhol_vap = CO2.rhoLiqSat(T_sample);
+el_vap = CO2.u_rhoT(rhol_vap,T_sample);
 
 
-semilogy(eg_vap_sample,rhog_vap_sample,'LineWidth',2,'DisplayName','gas');
+semilogy(eg_vap,rhog_vap,'LineWidth',2,'DisplayName','gas');
 hold on
-semilogy(el_vap_sample,rhol_vap_sample,'LineWidth',2,'DisplayName','liquid');
-semilogy(U(2,:)./U(1,:),U(1,:),'Linewidth',2,'DisplayName','simulation path');
+semilogy(el_vap,rhol_vap,'LineWidth',2,'DisplayName','liquid');
+semilogy(U(2,:)./U(1,:),U(1,:),'-x','Linewidth',2,'DisplayName','simulation path');
 grid on
 set(gca,'FontSize',16);
 xlabel('e [kJ/kg]');
