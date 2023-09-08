@@ -35,27 +35,31 @@ U_0   = [rho_0;rho_0*e_0;T_0];
 
 
 %% rho-e saturation curve parameterized by temperature
-T_sample = linspace(CO2.Tt, CO2.Tc,100)';
+n_sample = 1000;
+T_sample = linspace(CO2.Tt, CO2.Tc, n_sample)';
 rhog_vap = CO2.rhoVapSat(T_sample);
 eg_vap   = CO2.u_rhoT(rhog_vap,T_sample);
 rhol_vap = CO2.rhoLiqSat(T_sample);
 el_vap   = CO2.u_rhoT(rhol_vap,T_sample);
+vapour_curve = [rhog_vap eg_vap; rhol_vap(end:-1:1) el_vap(end:-1:1)];
 
 %% start time integration
-dt_list = 10; % 2.^(-4:2);
+dt_list = 2; % 2.^(-4:2);
 %dt_list = [1 2 4 8];
 Nsim = length(dt_list);
 U_list = zeros(3,Nsim);
 
 
 
+
 switch ODE_type
- 
+    
     
     case 1 % own RK method
         
         for kk = 1:Nsim
             dt = dt_list(kk)
+            dt_ref = dt;
             
             disp('integrating ODE with own RK method');
             options.RK_method.name = RK_method;
@@ -86,80 +90,93 @@ switch ODE_type
                 tn   = t(it_time);
                 F_RK = zeros(s,N);
                 
-                % evaluate F_RK at tn
-                nphase_tn = getnphase(Un);
-                if (nphase_tn == 1) % single phase
-                    F_RK(1,:) = F_tank_3eqnODE_singlephase(tn,Un,param);
-                elseif (nphase_tn == 2) % two-phase
-                    F_RK(1,:) = F_tank_3eqnODE_twophase(tn,Un,param);
-                end
-                % get first nontrivial stage value (U2)
-                U2   = Un + dt*(A_RK(2,:)*F_RK).';
-                % check if phase switching has occurred from Un to U2
-                nphase_stagej = getnphase(U2);
-
-                if (nphase_stagej ~= nphase_tn)
-                    % number of phases of Uj is different from Un
-                    % this means that part of the time step has been
-                    % performed with the wrong F
-                    % let's compute the intersection with the rho-e
-                    % curve
-                    [rho_star, e_star, hasintersect] = intersection(Un,U2,[rhol_vap el_vap]);
-                    dt_old = dt;
-                    if  (hasintersect)
-                        dt   = c_RK(2)*dt_old* (rho_star - Un(1))/(U2(1) - Un(1));                        
-                        if (dt<dt_old/100)
-                            dt = dt_old;
-                        end
-                    end
-                        
-                    % redo this stage with smaller time step
-                    %U2   = Un + dt*(A_RK(2,:)*F_RK).';
-                    % check again nphase
-                    %nphase_stagej = getnphase(Uj);
-                end                
-                
-                for j=2:s
+                for j=1:s
                     
                     % intermediate stage value of stage j
                     Uj   = Un + dt*(A_RK(j,:)*F_RK).';
                     
                     % time level of this stage
-                    tj   = tn + c_RK(j)*dt;                
-                             
-                    nphase_stagej = getnphase(Uj);
-                    if (nphase_stagej == 1) % single phase
-                        F_RK(j,:) = F_tank_3eqnODE_singlephase(tj,Uj,param);
-                    elseif (nphase_stagej == 2) % two-phase
-                        F_RK(j,:) = F_tank_3eqnODE_twophase(tj,Uj,param);
-                    end
+                    tj   = tn + c_RK(j)*dt;
+                    
+                    % flux evaluation
+                    F_RK(j,:) = F_tank_3eqnODE(tj,Uj,param);
+                    
+                    %                     nphase_stagej = getnphase(Uj);
+                    %                     if (nphase_stagej == 1) % single phase
+                    %                         F_RK(j,:) = F_tank_3eqnODE_singlephase(tj,Uj,param);
+                    %                     elseif (nphase_stagej == 2) % two-phase
+                    %                         F_RK(j,:) = F_tank_3eqnODE_twophase(tj,Uj,param);
+                    %                     end
                 end
                 
                 % update solution with the b-coefficients
                 Unew = Un + dt*(b_RK.'*F_RK).';
                 tnew = tn + dt;
                 
-                % update iteration counter
-                it_time = it_time + 1;
+                % test for number of phases
+                nphase_new = getnphase(Unew);
                 
-                
-                if (isnan(Unew))
-                    error('NaN encountered');
+                if (nphase_new ~= nphase(it_time) && ~switching)
+                    % number of phases of Uj is different from Un
+                    % this means that part of the time step has been
+                    % performed with the wrong F
+                    % let's compute the intersection with the rho-e
+                    % curve
+                    [rho_star, e_star, hasintersect] = intersection(Un,Unew,vapour_curve); %[rhol_vap el_vap]);
+                    % it could be that there is no intersection detected, 
+                    % even though the number of phases has changed. for
+                    % example because the getnphase() method uses a
+                    % different way to check for twophase flow than the
+                    % intersection() algoirhtm
+                    if  (hasintersect)
+                        disp('phase switching with time step adaptation');
+                        switching = true;
+                        dt   = dt_ref* abs((rho_star - Un(1))/(Unew(1) - Un(1)));
+                        if (dt<dt_ref/100) % time step getting too small
+                            dt = dt_ref;
+                        end
+                        % don't update counter and time vector but simply go again into loop
+
+                    else
+                        %
+                        dt = dt_ref;
+                        
+                        % update iteration counter
+                        it_time = it_time + 1;
+                        
+                        % store solution in entire vector
+                        t(it_time)   = tnew;
+                        U(:,it_time) = Unew;
+                        nphase(it_time) = getnphase(Unew);
+                        
+                        if (isnan(Unew))
+                            error('NaN encountered');
+                        end
+                        switching = false;
+                    end
+                    
+                    
+                    
+                else
+                    
+                    dt = dt_ref;
+                    
+                    % update iteration counter
+                    it_time = it_time + 1;
+                    
+                    % store solution in entire vector
+                    t(it_time)   = tnew;
+                    U(:,it_time) = Unew;
+                    nphase(it_time) = getnphase(Unew);
+                    
+                    if (isnan(Unew))
+                        error('NaN encountered');
+                    end
+                    switching = false;
+                    
                 end
                 
-                if (exist('dt_old','var') && dt_old ~= dt)
-                    dt = dt_old; % continue with old time step
-                end
                 
-                
-                % store solution in entire vector
-                t(it_time)   = tnew;
-                U(:,it_time) = Unew;
-                nphase(it_time) = getnphase(Unew);
-                
-                if (it_time >1 && (nphase(it_time) ~= nphase(it_time-1)))
-                    disp('phase switching');
-                end
                 
             end
             
